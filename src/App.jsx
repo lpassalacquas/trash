@@ -84,4 +84,462 @@ body { font-family: 'Syne', sans-serif; background: #0C0C0C; color: #F0EDE8; min
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 1rem; }
 .modal { background: #141414; border: 1px solid #2A2A2A; border-radius: 16px; padding: 1.75rem; width: 100%; max-width: 460px; max-height: 90vh; overflow-y: auto; }
 .modal h3 { font-size: 1.1rem; font-weight: 800; margin-bottom: 1.25rem; }
-.modal-actions { display: flex; gap: 8px; margin-top:
+.modal-actions { display: flex; gap: 8px; margin-top: 1.25rem; justify-content: flex-end; }
+.cancel-btn { background: transparent; border: 1px solid #2A2A2A; color: #888; padding: 9px 18px; border-radius: 8px; font-family: 'Syne', sans-serif; font-size: 13px; cursor: pointer; }
+.photo-upload-area { border: 1px dashed #2A2A2A; border-radius: 8px; padding: 1.5rem; text-align: center; cursor: pointer; margin-bottom: 10px; }
+.photo-upload-area p { font-size: 12px; color: #555; font-family: 'DM Mono', monospace; }
+.upload-preview { width: 100%; max-height: 140px; border-radius: 8px; object-fit: cover; margin-top: 8px; }
+.pin-page { max-width: 320px; margin: 6rem auto; padding: 0 1.5rem; text-align: center; }
+.pin-page h2 { font-size: 1.5rem; font-weight: 800; margin-bottom: 0.5rem; }
+.pin-page p { color: #666; font-size: 13px; font-family: 'DM Mono', monospace; margin-bottom: 1.5rem; }
+.pin-input { width: 100%; background: #141414; border: 1px solid #2A2A2A; border-radius: 10px; padding: 12px; color: #F0EDE8; font-size: 1.5rem; text-align: center; font-family: 'DM Mono', monospace; outline: none; letter-spacing: 0.4em; }
+.pin-input:focus { border-color: #FF8C00; }
+.pin-error { color: #F87171; font-size: 12px; font-family: 'DM Mono', monospace; margin-top: 8px; }
+.error-msg { color: #F87171; font-size: 12px; font-family: 'DM Mono', monospace; margin-top: 8px; text-align: center; }
+.loading { text-align: center; padding: 3rem 0; color: #444; font-family: 'DM Mono', monospace; font-size: 13px; }
+`;
+
+const CARD_STYLE = {
+  style: {
+    base: {
+      color: "#F0EDE8",
+      fontFamily: "DM Mono, monospace",
+      fontSize: "14px",
+      "::placeholder": { color: "#444" },
+    },
+    invalid: { color: "#F87171" },
+  },
+};
+
+async function api(body) {
+  const res = await fetch("/api/charge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+function CheckoutForm({ job, onSuccess, onCancel }) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function handleSubmit() {
+    if (!stripe || !elements) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const { error: pmError, paymentMethod } = await stripe.createPaymentMethod({
+        type: "card",
+        card: elements.getElement(CardElement),
+        billing_details: { name: job.name },
+      });
+      if (pmError) { setError(pmError.message); setLoading(false); return; }
+      onSuccess(paymentMethod.id);
+    } catch (e) {
+      setError("Something went wrong. Try again.");
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div>
+      <p style={{ fontSize: 12, color: "#666", fontFamily: "DM Mono, monospace", marginBottom: "1rem" }}>
+        Card saved now · charged ${job.total.toFixed(2)} after pickup is confirmed with photos
+      </p>
+      <div className="card-block">
+        <CardElement options={CARD_STYLE} />
+      </div>
+      {error && <p className="error-msg">{error}</p>}
+      <div className="modal-actions">
+        <button className="cancel-btn" onClick={onCancel}>Cancel</button>
+        <button className="submit-btn" style={{ width: "auto", padding: "9px 20px" }} onClick={handleSubmit} disabled={loading}>
+          {loading ? "Saving..." : "Confirm booking"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [view, setView] = useState("customer");
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [pin, setPin] = useState("");
+  const [pinError, setPinError] = useState(false);
+  const [jobs, setJobs] = useState([]);
+  const [loadingJobs, setLoadingJobs] = useState(false);
+  const [customerForm, setCustomerForm] = useState({ name: "", apt: "", bags: "", date: "", notes: "" });
+  const [checkoutJob, setCheckoutJob] = useState(null);
+  const [submitted, setSubmitted] = useState(null);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [completeModal, setCompleteModal] = useState(null);
+  const [addForm, setAddForm] = useState({ name: "", apt: "", bags: "", date: "", notes: "" });
+  const [pickupPhoto, setPickupPhoto] = useState(null);
+  const [disposalPhoto, setDisposalPhoto] = useState(null);
+  const [zelleModal, setZelleModal] = useState(null);
+  const [completing, setCompleting] = useState(false);
+  const [completeError, setCompleteError] = useState(null);
+
+  async function fetchJobs() {
+    setLoadingJobs(true);
+    try {
+      const data = await api({ action: "get_jobs" });
+      if (data.success) setJobs(data.jobs.map(j => ({ ...j, bags: Number(j.bags), total: Number(j.total) })));
+    } catch (e) { console.error(e); }
+    setLoadingJobs(false);
+  }
+
+  useEffect(() => {
+    if (view === "admin" && adminUnlocked) fetchJobs();
+  }, [view, adminUnlocked]);
+
+  async function saveJob(job) {
+    await api({ action: "create_job", job });
+    setJobs(prev => [job, ...prev]);
+  }
+
+  async function updateJob(id, updates) {
+    await api({ action: "update_job", id, updates });
+    setJobs(prev => prev.map(j => j.id === id ? { ...j, ...updates } : j));
+  }
+
+  async function deleteJob(id) {
+    await api({ action: "delete_job", id });
+    setJobs(prev => prev.filter(j => j.id !== id));
+  }
+
+  function handleCustomerProceed() {
+    const { name, apt, bags, date } = customerForm;
+    if (!name || !apt || !bags || !date) return;
+    const job = {
+      id: generateId(),
+      name,
+      address: `Apt ${apt}`,
+      bags: parseInt(bags),
+      date,
+      notes: customerForm.notes,
+      status: "pending",
+      total: parseInt(bags) * PRICE_PER_BAG,
+      paymentMethodId: "",
+      createdAt: new Date().toISOString(),
+      pickupPhoto: "",
+      disposalPhoto: "",
+      paymentMethod: "stripe",
+    };
+    setCheckoutJob(job);
+  }
+
+  async function handlePaymentSuccess(paymentMethodId) {
+    const job = { ...checkoutJob, paymentMethodId };
+    await saveJob(job);
+    setSubmitted(job);
+    setCheckoutJob(null);
+    setCustomerForm({ name: "", apt: "", bags: "", date: "", notes: "" });
+    try {
+      await api({
+        action: "notify",
+        type: "new_booking",
+        customerName: job.name,
+        apt: job.address,
+        bags: job.bags,
+        date: job.date,
+        total: job.total.toFixed(2),
+        jobId: job.id,
+      });
+    } catch (e) { console.error(e); }
+  }
+
+  async function handleAdminAdd() {
+    const { name, apt, bags, date } = addForm;
+    if (!name || !apt || !bags || !date) return;
+    const job = {
+      id: generateId(),
+      name,
+      address: `Apt ${apt}`,
+      bags: parseInt(bags),
+      date,
+      notes: addForm.notes,
+      status: "scheduled",
+      total: parseInt(bags) * PRICE_PER_BAG,
+      paymentMethodId: "",
+      createdAt: new Date().toISOString(),
+      pickupPhoto: "",
+      disposalPhoto: "",
+      paymentMethod: "manual",
+    };
+    await saveJob(job);
+    setShowAddModal(false);
+    setAddForm({ name: "", apt: "", bags: "", date: "", notes: "" });
+  }
+
+  async function handleCompleteJob() {
+    if (!pickupPhoto || !disposalPhoto) return;
+    setCompleting(true);
+    setCompleteError(null);
+    try {
+      if (completeModal.paymentMethod === "stripe" && completeModal.paymentMethodId) {
+        const res = await api({
+          action: "charge_and_complete",
+          paymentMethodId: completeModal.paymentMethodId,
+          amount: Math.round(completeModal.total * 100),
+          jobId: completeModal.id,
+          customerName: completeModal.name,
+          apt: completeModal.address,
+          bags: completeModal.bags,
+          total: completeModal.total.toFixed(2),
+          pickupPhoto,
+          disposalPhoto,
+        });
+        if (!res.success) { setCompleteError(res.error || "Charge failed."); setCompleting(false); return; }
+      } else {
+        await api({
+          action: "notify",
+          type: "job_complete",
+          jobId: completeModal.id,
+          customerName: completeModal.name,
+          apt: completeModal.address,
+          bags: completeModal.bags,
+          total: completeModal.total.toFixed(2),
+        });
+      }
+      const newStatus = completeModal.paymentMethod === "stripe" ? "paid" : "complete";
+      await updateJob(completeModal.id, { status: newStatus, pickupPhoto, disposalPhoto });
+      setCompleteModal(null);
+      setPickupPhoto(null);
+      setDisposalPhoto(null);
+    } catch (e) {
+      setCompleteError("Network error. Try again.");
+    }
+    setCompleting(false);
+  }
+
+  function readPhoto(file, setter) {
+    const reader = new FileReader();
+    reader.onload = e => setter(e.target.result);
+    reader.readAsDataURL(file);
+  }
+
+  function checkPin() {
+    if (pin === ADMIN_PIN) { setAdminUnlocked(true); setPinError(false); }
+    else { setPinError(true); setPin(""); }
+  }
+
+  const bagCount = parseInt(customerForm.bags) || 0;
+  const price = (bagCount * PRICE_PER_BAG).toFixed(2);
+  const totalEarned = jobs.filter(j => j.status === "paid" || j.status === "complete").reduce((s, j) => s + Number(j.total), 0);
+
+  return (
+    <>
+      <style>{fonts}{styles}</style>
+      <div>
+        <nav className="nav">
+          <div className="nav-logo">🗑 BagRun</div>
+          <div className="nav-tabs">
+            <button className={`nav-tab ${view === "customer" ? "active" : ""}`} onClick={() => { setView("customer"); setSubmitted(null); setCheckoutJob(null); }}>Book pickup</button>
+            <button className={`nav-tab ${view === "admin" ? "active" : ""}`} onClick={() => setView("admin")}>Admin</button>
+          </div>
+        </nav>
+
+        {view === "customer" && !submitted && !checkoutJob && (
+          <div className="form-page">
+            <div className="form-hero">
+              <h1>Trash pickup,<br /><span>done for you.</span></h1>
+              <p>Reserve at White Oak · Baton Rouge, LA<br />Leave your bags outside your door. We grab them & dispose of them.<br />Only $1 per bag · charged after pickup is confirmed.</p>
+            </div>
+            <div className="form-card">
+              <p className="form-section-label">Your details</p>
+              <div className="form-group">
+                <label className="form-label">Full name</label>
+                <input className="form-input" placeholder="Jane Smith" value={customerForm.name} onChange={e => setCustomerForm(p => ({ ...p, name: e.target.value }))} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Apartment number</label>
+                <input className="form-input" placeholder="e.g. 204" value={customerForm.apt} onChange={e => setCustomerForm(p => ({ ...p, apt: e.target.value }))} />
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">Number of bags</label>
+                  <input className="form-input" type="number" min="1" placeholder="e.g. 4" value={customerForm.bags} onChange={e => setCustomerForm(p => ({ ...p, bags: e.target.value }))} />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Pickup date</label>
+                  <input className="form-input" type="date" value={customerForm.date} onChange={e => setCustomerForm(p => ({ ...p, date: e.target.value }))} />
+                </div>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Special instructions (optional)</label>
+                <input className="form-input" placeholder="Bags on left side of door..." value={customerForm.notes} onChange={e => setCustomerForm(p => ({ ...p, notes: e.target.value }))} />
+              </div>
+              {bagCount > 0 && (
+                <div className="price-preview">
+                  <span className="price-label">{bagCount} bag{bagCount !== 1 ? "s" : ""} × $1.00</span>
+                  <span className="price-amount">${price}</span>
+                </div>
+              )}
+              <button className="submit-btn" onClick={handleCustomerProceed} disabled={!customerForm.name || !customerForm.apt || !customerForm.bags || !customerForm.date}>
+                Continue to payment →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {view === "customer" && checkoutJob && !submitted && (
+          <div className="form-page">
+            <div className="form-hero">
+              <h1>Almost done,<br /><span>{checkoutJob.name.split(" ")[0]}.</span></h1>
+              <p>Enter your card to save on file. You won't be charged until pickup is confirmed with photos.</p>
+            </div>
+            <div className="form-card">
+              <Elements stripe={stripePromise}>
+                <CheckoutForm job={checkoutJob} onSuccess={handlePaymentSuccess} onCancel={() => setCheckoutJob(null)} />
+              </Elements>
+            </div>
+          </div>
+        )}
+
+        {view === "customer" && submitted && (
+          <div className="success-page">
+            <div className="success-icon">✅</div>
+            <h2>You're all set!</h2>
+            <p>Your pickup request is confirmed. Leave your bags outside on the scheduled date.</p>
+            <div className="job-id">{submitted.id}</div>
+            <p>You'll be charged <strong style={{ color: "#FF8C00" }}>${submitted.total.toFixed(2)}</strong> once pickup is confirmed with photos.</p>
+            <br />
+            <button className="back-btn" onClick={() => setSubmitted(null)}>Book another pickup</button>
+          </div>
+        )}
+
+        {view === "admin" && !adminUnlocked && (
+          <div className="pin-page">
+            <h2>Admin access</h2>
+            <p>Enter your PIN to continue</p>
+            <input className="pin-input" type="password" maxLength={4} placeholder="····" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => e.key === "Enter" && checkPin()} />
+            {pinError && <p className="pin-error">Wrong PIN.</p>}
+            <br /><br />
+            <button className="submit-btn" onClick={checkPin} style={{ maxWidth: 200 }}>Unlock →</button>
+          </div>
+        )}
+
+        {view === "admin" && adminUnlocked && (
+          <div className="admin-page">
+            <div className="admin-header">
+              <div className="admin-title">Dashboard</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="add-job-btn" onClick={fetchJobs}>↻ Refresh</button>
+                <button className="add-job-btn" onClick={() => setShowAddModal(true)}>+ Add job</button>
+              </div>
+            </div>
+            <div className="stats-row">
+              <div className="stat-card"><div className="stat-val">${totalEarned.toFixed(2)}</div><div className="stat-label">total earned</div></div>
+              <div className="stat-card"><div className="stat-val">{jobs.length}</div><div className="stat-label">all jobs</div></div>
+              <div className="stat-card"><div className="stat-val">{jobs.filter(j => j.status === "pending").length}</div><div className="stat-label">pending</div></div>
+              <div className="stat-card"><div className="stat-val">{jobs.filter(j => j.status === "scheduled").length}</div><div className="stat-label">scheduled</div></div>
+            </div>
+            {loadingJobs && <div className="loading">Loading jobs...</div>}
+            {!loadingJobs && jobs.length === 0 && <div style={{ textAlign: "center", padding: "3rem 0", color: "#444", fontFamily: "DM Mono, monospace", fontSize: 13 }}>No jobs yet.</div>}
+            <div className="jobs-list">
+              {jobs.map(job => {
+                const sc = STATUS_COLORS[job.status] || STATUS_COLORS.pending;
+                return (
+                  <div className="job-card" key={job.id}>
+                    <div className="job-top">
+                      <div><div className="job-name">{job.name}</div><div className="job-addr">{job.address}</div></div>
+                      <span className="status-badge" style={{ background: sc.bg, color: sc.text }}>{sc.label}</span>
+                    </div>
+                    <div className="job-meta">
+                      <div className="job-meta-item">Bags: <span>{job.bags}</span></div>
+                      <div className="job-meta-item">Total: <span>${Number(job.total).toFixed(2)}</span></div>
+                      <div className="job-meta-item">Date: <span>{job.date}</span></div>
+                      <div className="job-meta-item">ID: <span>{job.id}</span></div>
+                      <div className="job-meta-item">Pay: <span>{job.paymentMethod}</span></div>
+                    </div>
+                    {(job.pickupPhoto || job.disposalPhoto) && (
+                      <div className="photos-row">
+                        {job.pickupPhoto && <img className="photo-thumb" src={job.pickupPhoto} alt="pickup" />}
+                        {job.disposalPhoto && <img className="photo-thumb" src={job.disposalPhoto} alt="disposal" />}
+                      </div>
+                    )}
+                    {job.notes && <p style={{ fontSize: 12, color: "#555", fontFamily: "DM Mono, monospace", marginTop: 8 }}>Note: {job.notes}</p>}
+                    <div className="job-actions">
+                      {job.status === "pending" && <button className="action-btn" onClick={() => updateJob(job.id, { status: "scheduled" })}>Mark scheduled</button>}
+                      {(job.status === "pending" || job.status === "scheduled") && <button className="action-btn primary" onClick={() => setCompleteModal(job)}>Mark complete + photos</button>}
+                      {job.status === "complete" && <button className="action-btn zelle" onClick={() => setZelleModal(job)}>Send payment request</button>}
+                      <button className="action-btn danger" onClick={() => deleteJob(job.id)}>Delete</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {showAddModal && (
+          <div className="modal-overlay" onClick={() => setShowAddModal(false)}>
+            <div className="modal" onClick={e => e.stopPropagation()}>
+              <h3>Add job manually</h3>
+              <div className="form-group"><label className="form-label">Customer name</label><input className="form-input" placeholder="John Doe" value={addForm.name} onChange={e => setAddForm(p => ({ ...p, name: e.target.value }))} /></div>
+              <div className="form-group"><label className="form-label">Apartment number</label><input className="form-input" placeholder="e.g. 204" value={addForm.apt} onChange={e => setAddForm(p => ({ ...p, apt: e.target.value }))} /></div>
+              <div className="form-row">
+                <div className="form-group"><label className="form-label">Bags</label><input className="form-input" type="number" min="1" placeholder="2" value={addForm.bags} onChange={e => setAddForm(p => ({ ...p, bags: e.target.value }))} /></div>
+                <div className="form-group"><label className="form-label">Date</label><input className="form-input" type="date" value={addForm.date} onChange={e => setAddForm(p => ({ ...p, date: e.target.value }))} /></div>
+              </div>
+              <div className="form-group"><label className="form-label">Notes (optional)</label><input className="form-input" placeholder="Any details..." value={addForm.notes} onChange={e => setAddForm(p => ({ ...p, notes: e.target.value }))} /></div>
+              {addForm.bags && <div className="price-preview"><span className="price-label">{addForm.bags} bags × $1.00</span><span className="price-amount">${(parseInt(addForm.bags) * 1.0).toFixed(2)}</span></div>}
+              <div className="modal-actions">
+                <button className="cancel-btn" onClick={() => setShowAddModal(false)}>Cancel</button>
+                <button className="submit-btn" style={{ width: "auto", padding: "9px 20px" }} onClick={handleAdminAdd} disabled={!addForm.name || !addForm.apt || !addForm.bags || !addForm.date}>Add job</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {completeModal && (
+          <div className="modal-overlay" onClick={() => setCompleteModal(null)}>
+            <div className="modal" onClick={e => e.stopPropagation()}>
+              <h3>Complete · {completeModal.name}</h3>
+              <p style={{ fontSize: 12, color: "#666", fontFamily: "DM Mono, monospace", marginBottom: "1.25rem" }}>Upload both photos to confirm and {completeModal.paymentMethod === "stripe" ? `charge $${Number(completeModal.total).toFixed(2)}` : "mark complete"}.</p>
+              <label className="form-label" style={{ marginBottom: 6 }}>Photo 1 — bags picked up</label>
+              <label className="photo-upload-area">
+                <input type="file" accept="image/*" style={{ display: "none" }} onChange={e => e.target.files[0] && readPhoto(e.target.files[0], setPickupPhoto)} />
+                {pickupPhoto ? <img className="upload-preview" src={pickupPhoto} alt="pickup" /> : <p>Tap to upload pickup photo</p>}
+              </label>
+              <label className="form-label" style={{ marginBottom: 6, marginTop: 8 }}>Photo 2 — bags disposed</label>
+              <label className="photo-upload-area">
+                <input type="file" accept="image/*" style={{ display: "none" }} onChange={e => e.target.files[0] && readPhoto(e.target.files[0], setDisposalPhoto)} />
+                {disposalPhoto ? <img className="upload-preview" src={disposalPhoto} alt="disposal" /> : <p>Tap to upload disposal photo</p>}
+              </label>
+              {completeError && <p className="error-msg">{completeError}</p>}
+              <div className="modal-actions">
+                <button className="cancel-btn" onClick={() => { setCompleteModal(null); setPickupPhoto(null); setDisposalPhoto(null); setCompleteError(null); }}>Cancel</button>
+                <button className="submit-btn" style={{ width: "auto", padding: "9px 20px" }} onClick={handleCompleteJob} disabled={!pickupPhoto || !disposalPhoto || completing}>
+                  {completing ? "Processing..." : completeModal.paymentMethod === "stripe" ? `Charge $${Number(completeModal.total).toFixed(2)}` : "Mark complete"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {zelleModal && (
+          <div className="modal-overlay" onClick={() => setZelleModal(null)}>
+            <div className="modal" onClick={e => e.stopPropagation()}>
+              <h3>Collect payment · {zelleModal.name}</h3>
+              <p style={{ fontSize: 12, color: "#666", fontFamily: "DM Mono, monospace", marginBottom: "1.25rem" }}>Request ${Number(zelleModal.total).toFixed(2)} via any of these:</p>
+              {[ZELLE, CASHAPP, VENMO].map(p => (
+                <div key={p.name} style={{ background: "#0C0C0C", border: "1px solid #2A2A2A", borderRadius: 8, padding: "12px 14px", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div><div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div><div style={{ fontSize: 12, color: "#666", fontFamily: "DM Mono, monospace" }}>{p.handle}</div></div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "#FF8C00", fontFamily: "DM Mono, monospace" }}>${Number(zelleModal.total).toFixed(2)}</div>
+                </div>
+              ))}
+              <div className="modal-actions">
+                <button className="cancel-btn" onClick={() => setZelleModal(null)}>Close</button>
+                <button className="submit-btn" style={{ width: "auto", padding: "9px 20px" }} onClick={() => { updateJob(zelleModal.id, { status: "paid" }); setZelleModal(null); }}>Mark as paid</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
